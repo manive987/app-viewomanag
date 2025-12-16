@@ -127,6 +127,55 @@ async def get_me(current_user: User = Depends(get_current_user)):
 
 # ==================== VIDEO ROUTES ====================
 
+@api_router.get("/videos/stats", response_model=StatsResponse)
+async def get_stats(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get user's video statistics"""
+    # Get total count
+    result = await db.execute(
+        select(func.count(Video.id)).where(Video.user_id == current_user.id)
+    )
+    total_videos = result.scalar_one()
+    
+    # Get count by status
+    result = await db.execute(
+        select(func.count(Video.id))
+        .where(and_(Video.user_id == current_user.id, Video.status == "concluido"))
+    )
+    videos_concluidos = result.scalar_one()
+    
+    result = await db.execute(
+        select(func.count(Video.id))
+        .where(and_(Video.user_id == current_user.id, Video.status == "planejado"))
+    )
+    videos_planejado = result.scalar_one()
+    
+    result = await db.execute(
+        select(func.count(Video.id))
+        .where(and_(Video.user_id == current_user.id, Video.status == "em-producao"))
+    )
+    videos_em_producao = result.scalar_one()
+    
+    result = await db.execute(
+        select(func.count(Video.id))
+        .where(and_(Video.user_id == current_user.id, Video.status == "em-edicao"))
+    )
+    videos_em_edicao = result.scalar_one()
+    
+    # Calculate nivel (level) based on completed videos
+    nivel = min(videos_concluidos // 5 + 1, 99)  # Level up every 5 completed videos, max 99
+    
+    return StatsResponse(
+        total_videos=total_videos,
+        videos_concluidos=videos_concluidos,
+        videos_planejado=videos_planejado,
+        videos_em_producao=videos_em_producao,
+        videos_em_edicao=videos_em_edicao,
+        nivel=nivel
+    )
+
 @api_router.get("/videos", response_model=List[VideoResponse])
 async def get_videos(
     search: Optional[str] = None,
