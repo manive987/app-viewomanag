@@ -11,8 +11,8 @@ from dotenv import load_dotenv
 from bson import ObjectId
 
 # Import local modules
-from database_mongo import db, users_collection, videos_collection, create_indexes
-from models_mongo import UserDB, VideoDB
+from database import db, users_collection, videos_collection, create_indexes
+from models import UserDB, VideoDB
 from schemas import (
     UserCreate, UserLogin, UserResponse, TokenResponse,
     VideoCreate, VideoUpdate, VideoResponse,
