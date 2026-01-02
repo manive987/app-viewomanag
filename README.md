@@ -1,4 +1,73 @@
-# VideoFlow - Gestão de Vídeos PWA
+# 🚀 VideoFlow - Gestão de Vídeos PWA
+
+Aplicativo completo de gestão de vídeos com foco em produtividade e compatibilidade Android via PWA.
+
+## 📚 Documentação Disponível
+
+| Arquivo | Descrição | Quando Usar |
+|---------|-----------|-------------|
+| **TUTORIAL_DEPLOY_COMPLETO.md** | Tutorial passo a passo com CADA clique | Deploy pela primeira vez |
+| **deploy-assistant.bat** | Script assistente Windows | Deploy automatizado |
+| **deploy-assistant.sh** | Script assistente Mac/Linux | Deploy automatizado |
+| **DEPLOY.md** | Guia completo de deploy | Referência detalhada |
+| **DEPLOY_RAPIDO.md** | Deploy em 20 minutos | Já sabe o básico |
+| **INSTALACAO.md** | Instalação local completa | Desenvolver localmente |
+| **QUICKSTART.md** | Rodar local em 5 minutos | Teste rápido local |
+| **README.md** | Este arquivo | Visão geral |
+
+---
+
+## 🎯 Como Começar?
+
+### 🌐 **Quero colocar ONLINE (Vercel + Render + MongoDB)**
+
+**Opção 1: Tutorial Detalhado (Recomendado)**
+```markdown
+Abra: TUTORIAL_DEPLOY_COMPLETO.md
+Siga cada passo com capturas textuais
+Tempo: ~30 minutos
+```
+
+**Opção 2: Script Assistente**
+
+**Windows:**
+```cmd
+deploy-assistant.bat
+```
+
+**Mac/Linux:**
+```bash
+chmod +x deploy-assistant.sh
+./deploy-assistant.sh
+```
+
+**Opção 3: Guia Rápido**
+```markdown
+Abra: DEPLOY_RAPIDO.md
+Deploy em 20 minutos
+```
+
+---
+
+### 💻 **Quero rodar LOCALMENTE (desenvolvimento)**
+
+**Instalação Completa:**
+```markdown
+Abra: INSTALACAO.md
+Guia passo a passo com tudo
+```
+
+**Quick Start (5 minutos):**
+```markdown
+Abra: QUICKSTART.md
+Comandos diretos
+```
+
+---
+
+# 🚀 Guia Completo de Instalação - VideoFlow PWA
+
+Guia passo a passo para instalar e configurar o VideoFlow do zero.
 
 Aplicativo completo e escalável de gestão de vídeos com foco em produtividade e compatibilidade total com Android (via PWA + Bubblewrap).
 
