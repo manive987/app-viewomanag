@@ -19,7 +19,7 @@ from schemas import (
     BulkUpdateRequest, BulkDeleteRequest,
     ImportRequest, ImportResponse, StatsResponse
 )
-from auth import (
+from auth_mongo import (
     get_password_hash, verify_password, create_access_token, get_current_user
 )
 
