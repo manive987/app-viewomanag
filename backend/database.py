@@ -1,35 +1,40 @@
-# Database setup for SQLite with SQLAlchemy
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.orm import declarative_base
+# MongoDB Database Configuration
+from motor.motor_asyncio import AsyncIOMotorClient
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
-# SQLite database path
+# Load environment variables
 ROOT_DIR = Path(__file__).parent
-DATABASE_PATH = ROOT_DIR / "videoflow.db"
-DATABASE_URL = f"sqlite+aiosqlite:///{DATABASE_PATH}"
+load_dotenv(ROOT_DIR / '.env')
 
-# Create async engine
-engine = create_async_engine(
-    DATABASE_URL,
-    echo=False,
-    future=True
-)
+# MongoDB connection
+MONGO_URL = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
+DB_NAME = os.environ.get('DB_NAME', 'videoflow_db')
 
-# Create session factory
-AsyncSessionLocal = async_sessionmaker(
-    engine,
-    class_=AsyncSession,
-    expire_on_commit=False
-)
+# Create MongoDB client
+client = AsyncIOMotorClient(MONGO_URL)
+db = client[DB_NAME]
 
-# Base class for models
-Base = declarative_base()
+# Collections
+users_collection = db.users
+videos_collection = db.videos
 
-# Dependency to get database session
+# Create indexes for better performance
+async def create_indexes():
+    """Create indexes for MongoDB collections"""
+    # Users indexes
+    await users_collection.create_index("email", unique=True)
+    await users_collection.create_index("username", unique=True)
+    
+    # Videos indexes
+    await videos_collection.create_index("user_id")
+    await videos_collection.create_index("status")
+    await videos_collection.create_index("data_criacao")
+    await videos_collection.create_index([("titulo", "text"), ("descricao", "text"), ("roteiro", "text")])
+    
+    print("MongoDB indexes created successfully")
+
+# Dependency to get database
 async def get_db():
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
+    return db

@@ -1,33 +1,51 @@
-# Database models for VideoFlow
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
-from sqlalchemy.orm import relationship
+# Pydantic models for MongoDB
+from pydantic import BaseModel, Field, EmailStr
+from typing import Optional
 from datetime import datetime, timezone
-from database import Base
+from bson import ObjectId
 
-class User(Base):
-    __tablename__ = "users"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True, nullable=False)
-    username = Column(String, unique=True, index=True, nullable=False)
-    hashed_password = Column(String, nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    
-    # Relationship with videos
-    videos = relationship("Video", back_populates="owner", cascade="all, delete-orphan")
+# Custom ObjectId handler
+class PyObjectId(ObjectId):
+    @classmethod
+    def __get_validators__(cls):
+        yield cls.validate
 
-class Video(Base):
-    __tablename__ = "videos"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    titulo = Column(String, nullable=False, index=True)
-    descricao = Column(Text, nullable=True)
-    roteiro = Column(Text, nullable=True)
-    url = Column(String, nullable=True)
-    status = Column(String, default="planejado", index=True)  # planejado, em-producao, em-edicao, concluido
-    data_criacao = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
-    data_conclusao = Column(DateTime, nullable=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    
-    # Relationship with user
-    owner = relationship("User", back_populates="videos")
+    @classmethod
+    def validate(cls, v):
+        if not ObjectId.is_valid(v):
+            raise ValueError("Invalid objectid")
+        return ObjectId(v)
+
+    @classmethod
+    def __modify_schema__(cls, field_schema):
+        field_schema.update(type="string")
+
+# User Model
+class UserDB(BaseModel):
+    id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
+    email: EmailStr
+    username: str
+    hashed_password: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    class Config:
+        populate_by_name = True
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+# Video Model
+class VideoDB(BaseModel):
+    id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
+    titulo: str
+    descricao: Optional[str] = None
+    roteiro: Optional[str] = None
+    url: Optional[str] = None
+    status: str = "planejado"
+    data_criacao: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    data_conclusao: Optional[datetime] = None
+    user_id: str  # Reference to User ObjectId
+
+    class Config:
+        populate_by_name = True
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str, datetime: lambda v: v.isoformat()}

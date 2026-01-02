@@ -1,6 +1,8 @@
-# VideoFlow FastAPI Backend with MongoDB and JWT
+# VideoFlow FastAPI Backend with SQLite and JWT
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, or_, and_
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 import os
@@ -8,18 +10,17 @@ import logging
 import re
 from pathlib import Path
 from dotenv import load_dotenv
-from bson import ObjectId
 
 # Import local modules
-from database_mongo import db, users_collection, videos_collection, create_indexes
-from models_mongo import UserDB, VideoDB
+from database import engine, Base, get_db
+from models import User, Video
 from schemas import (
     UserCreate, UserLogin, UserResponse, TokenResponse,
     VideoCreate, VideoUpdate, VideoResponse,
     BulkUpdateRequest, BulkDeleteRequest,
     ImportRequest, ImportResponse, StatsResponse
 )
-from auth_mongo import (
+from auth import (
     get_password_hash, verify_password, create_access_token, get_current_user
 )
 
@@ -53,47 +54,26 @@ logger = logging.getLogger(__name__)
 @app.on_event("startup")
 async def startup():
     """Initialize database on startup"""
-    await create_indexes()
-    logger.info("MongoDB initialized successfully")
-
-# Helper function to convert ObjectId to string
-def video_helper(video) -> dict:
-    return {
-        "id": str(video["_id"]),
-        "titulo": video["titulo"],
-        "descricao": video.get("descricao"),
-        "roteiro": video.get("roteiro"),
-        "url": video.get("url"),
-        "status": video["status"],
-        "data_criacao": video["data_criacao"],
-        "data_conclusao": video.get("data_conclusao"),
-        "user_id": str(video["user_id"])
-    }
-
-def user_helper(user) -> dict:
-    return {
-        "id": str(user["_id"]),
-        "email": user["email"],
-        "username": user["username"],
-        "created_at": user["created_at"]
-    }
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    logger.info("Database initialized successfully")
 
 # ==================== AUTH ROUTES ====================
 
 @api_router.post("/auth/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-async def register(user_data: UserCreate):
+async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
     """Register a new user"""
     # Check if email already exists
-    existing_user = await users_collection.find_one({"email": user_data.email})
-    if existing_user:
+    result = await db.execute(select(User).where(User.email == user_data.email))
+    if result.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
         )
     
     # Check if username already exists
-    existing_user = await users_collection.find_one({"username": user_data.username})
-    if existing_user:
+    result = await db.execute(select(User).where(User.username == user_data.username))
+    if result.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Username already taken"
@@ -101,67 +81,91 @@ async def register(user_data: UserCreate):
     
     # Create new user
     hashed_password = get_password_hash(user_data.password)
-    new_user = {
-        "email": user_data.email,
-        "username": user_data.username,
-        "hashed_password": hashed_password,
-        "created_at": datetime.now(timezone.utc)
-    }
+    new_user = User(
+        email=user_data.email,
+        username=user_data.username,
+        hashed_password=hashed_password
+    )
     
-    result = await users_collection.insert_one(new_user)
-    new_user["_id"] = result.inserted_id
+    db.add(new_user)
+    await db.commit()
+    await db.refresh(new_user)
     
     # Create access token
-    access_token = create_access_token(data={"sub": str(result.inserted_id)})
+    access_token = create_access_token(data={"sub": str(new_user.id)})
     
     return TokenResponse(
         access_token=access_token,
-        user=UserResponse(**user_helper(new_user))
+        user=UserResponse.model_validate(new_user)
     )
 
 @api_router.post("/auth/login", response_model=TokenResponse)
-async def login(user_data: UserLogin):
+async def login(user_data: UserLogin, db: AsyncSession = Depends(get_db)):
     """Login user and return JWT token"""
     # Find user by email
-    user = await users_collection.find_one({"email": user_data.email})
+    result = await db.execute(select(User).where(User.email == user_data.email))
+    user = result.scalar_one_or_none()
     
-    if not user or not verify_password(user_data.password, user["hashed_password"]):
+    if not user or not verify_password(user_data.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password"
         )
     
     # Create access token
-    access_token = create_access_token(data={"sub": str(user["_id"])})
+    access_token = create_access_token(data={"sub": str(user.id)})
     
     return TokenResponse(
         access_token=access_token,
-        user=UserResponse(**user_helper(user))
+        user=UserResponse.model_validate(user)
     )
 
 @api_router.get("/auth/me", response_model=UserResponse)
-async def get_me(current_user: dict = Depends(get_current_user)):
+async def get_me(current_user: User = Depends(get_current_user)):
     """Get current user info"""
-    return UserResponse(**user_helper(current_user))
+    return UserResponse.model_validate(current_user)
 
 # ==================== VIDEO ROUTES ====================
 
 @api_router.get("/videos/stats", response_model=StatsResponse)
-async def get_stats(current_user: dict = Depends(get_current_user)):
+async def get_stats(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
     """Get user's video statistics"""
-    user_id = str(current_user["_id"])
-    
     # Get total count
-    total_videos = await videos_collection.count_documents({"user_id": user_id})
+    result = await db.execute(
+        select(func.count(Video.id)).where(Video.user_id == current_user.id)
+    )
+    total_videos = result.scalar_one()
     
     # Get count by status
-    videos_concluidos = await videos_collection.count_documents({"user_id": user_id, "status": "concluido"})
-    videos_planejado = await videos_collection.count_documents({"user_id": user_id, "status": "planejado"})
-    videos_em_producao = await videos_collection.count_documents({"user_id": user_id, "status": "em-producao"})
-    videos_em_edicao = await videos_collection.count_documents({"user_id": user_id, "status": "em-edicao"})
+    result = await db.execute(
+        select(func.count(Video.id))
+        .where(and_(Video.user_id == current_user.id, Video.status == "concluido"))
+    )
+    videos_concluidos = result.scalar_one()
+    
+    result = await db.execute(
+        select(func.count(Video.id))
+        .where(and_(Video.user_id == current_user.id, Video.status == "planejado"))
+    )
+    videos_planejado = result.scalar_one()
+    
+    result = await db.execute(
+        select(func.count(Video.id))
+        .where(and_(Video.user_id == current_user.id, Video.status == "em-producao"))
+    )
+    videos_em_producao = result.scalar_one()
+    
+    result = await db.execute(
+        select(func.count(Video.id))
+        .where(and_(Video.user_id == current_user.id, Video.status == "em-edicao"))
+    )
+    videos_em_edicao = result.scalar_one()
     
     # Calculate nivel (level) based on completed videos
-    nivel = min(videos_concluidos // 5 + 1, 99)
+    nivel = min(videos_concluidos // 5 + 1, 99)  # Level up every 5 completed videos, max 99
     
     return StatsResponse(
         total_videos=total_videos,
@@ -179,23 +183,26 @@ async def get_videos(
     time_filter: Optional[str] = None,
     skip: int = 0,
     limit: int = 12,
-    current_user: dict = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
 ):
     """Get user's videos with filters and pagination"""
-    user_id = str(current_user["_id"])
-    query = {"user_id": user_id}
+    query = select(Video).where(Video.user_id == current_user.id)
     
     # Apply search filter
     if search:
-        query["$or"] = [
-            {"titulo": {"$regex": search, "$options": "i"}},
-            {"descricao": {"$regex": search, "$options": "i"}},
-            {"roteiro": {"$regex": search, "$options": "i"}}
-        ]
+        search_pattern = f"%{search}%"
+        query = query.where(
+            or_(
+                Video.titulo.ilike(search_pattern),
+                Video.descricao.ilike(search_pattern),
+                Video.roteiro.ilike(search_pattern)
+            )
+        )
     
     # Apply status filter
     if status_filter:
-        query["status"] = status_filter
+        query = query.where(Video.status == status_filter)
     
     # Apply time filter
     if time_filter:
@@ -214,36 +221,44 @@ async def get_videos(
             "1a": now - timedelta(days=365),
         }
         if time_filter in time_filters:
-            query["data_criacao"] = {"$gte": time_filters[time_filter]}
+            query = query.where(Video.data_criacao >= time_filters[time_filter])
     
-    # Get videos with pagination
-    cursor = videos_collection.find(query).sort("data_criacao", -1).skip(skip).limit(limit)
-    videos = await cursor.to_list(length=limit)
+    # Order by creation date (most recent first)
+    query = query.order_by(Video.data_criacao.desc())
     
-    return [VideoResponse(**video_helper(video)) for video in videos]
+    # Apply pagination
+    query = query.offset(skip).limit(limit)
+    
+    result = await db.execute(query)
+    videos = result.scalars().all()
+    
+    return [VideoResponse.model_validate(video) for video in videos]
 
 @api_router.get("/videos/count")
 async def get_videos_count(
     search: Optional[str] = None,
     status_filter: Optional[str] = None,
     time_filter: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
 ):
     """Get total count of videos matching filters"""
-    user_id = str(current_user["_id"])
-    query = {"user_id": user_id}
+    query = select(func.count(Video.id)).where(Video.user_id == current_user.id)
     
     # Apply search filter
     if search:
-        query["$or"] = [
-            {"titulo": {"$regex": search, "$options": "i"}},
-            {"descricao": {"$regex": search, "$options": "i"}},
-            {"roteiro": {"$regex": search, "$options": "i"}}
-        ]
+        search_pattern = f"%{search}%"
+        query = query.where(
+            or_(
+                Video.titulo.ilike(search_pattern),
+                Video.descricao.ilike(search_pattern),
+                Video.roteiro.ilike(search_pattern)
+            )
+        )
     
     # Apply status filter
     if status_filter:
-        query["status"] = status_filter
+        query = query.where(Video.status == status_filter)
     
     # Apply time filter
     if time_filter:
@@ -262,50 +277,48 @@ async def get_videos_count(
             "1a": now - timedelta(days=365),
         }
         if time_filter in time_filters:
-            query["data_criacao"] = {"$gte": time_filters[time_filter]}
+            query = query.where(Video.data_criacao >= time_filters[time_filter])
     
-    count = await videos_collection.count_documents(query)
+    result = await db.execute(query)
+    count = result.scalar_one()
+    
     return {"count": count}
 
 @api_router.post("/videos", response_model=VideoResponse, status_code=status.HTTP_201_CREATED)
 async def create_video(
     video_data: VideoCreate,
-    current_user: dict = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
 ):
     """Create a new video"""
-    user_id = str(current_user["_id"])
+    new_video = Video(
+        **video_data.model_dump(),
+        user_id=current_user.id
+    )
     
-    new_video = {
-        "titulo": video_data.titulo,
-        "descricao": video_data.descricao,
-        "roteiro": video_data.roteiro,
-        "url": video_data.url,
-        "status": video_data.status,
-        "data_criacao": datetime.now(timezone.utc),
-        "data_conclusao": datetime.now(timezone.utc) if video_data.status == "concluido" else None,
-        "user_id": user_id
-    }
+    # Set data_conclusao if status is concluido
+    if new_video.status == "concluido":
+        new_video.data_conclusao = datetime.now(timezone.utc)
     
-    result = await videos_collection.insert_one(new_video)
-    new_video["_id"] = result.inserted_id
+    db.add(new_video)
+    await db.commit()
+    await db.refresh(new_video)
     
-    return VideoResponse(**video_helper(new_video))
+    return VideoResponse.model_validate(new_video)
 
 @api_router.get("/videos/{video_id}", response_model=VideoResponse)
 async def get_video(
-    video_id: str,
-    current_user: dict = Depends(get_current_user)
+    video_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
 ):
     """Get a specific video"""
-    user_id = str(current_user["_id"])
-    
-    try:
-        video = await videos_collection.find_one({"_id": ObjectId(video_id), "user_id": user_id})
-    except:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid video ID"
+    result = await db.execute(
+        select(Video).where(
+            and_(Video.id == video_id, Video.user_id == current_user.id)
         )
+    )
+    video = result.scalar_one_or_none()
     
     if not video:
         raise HTTPException(
@@ -313,24 +326,22 @@ async def get_video(
             detail="Video not found"
         )
     
-    return VideoResponse(**video_helper(video))
+    return VideoResponse.model_validate(video)
 
 @api_router.put("/videos/{video_id}", response_model=VideoResponse)
 async def update_video(
-    video_id: str,
+    video_id: int,
     video_data: VideoUpdate,
-    current_user: dict = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
 ):
     """Update a video"""
-    user_id = str(current_user["_id"])
-    
-    try:
-        video = await videos_collection.find_one({"_id": ObjectId(video_id), "user_id": user_id})
-    except:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid video ID"
+    result = await db.execute(
+        select(Video).where(
+            and_(Video.id == video_id, Video.user_id == current_user.id)
         )
+    )
+    video = result.scalar_one_or_none()
     
     if not video:
         raise HTTPException(
@@ -340,40 +351,40 @@ async def update_video(
     
     # Update fields
     update_data = video_data.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(video, field, value)
     
     # Auto-set data_conclusao if status changed to concluido
-    if video_data.status == "concluido" and not video.get("data_conclusao"):
-        update_data["data_conclusao"] = datetime.now(timezone.utc)
+    if video_data.status == "concluido" and not video.data_conclusao:
+        video.data_conclusao = datetime.now(timezone.utc)
     
-    await videos_collection.update_one(
-        {"_id": ObjectId(video_id)},
-        {"$set": update_data}
-    )
+    await db.commit()
+    await db.refresh(video)
     
-    updated_video = await videos_collection.find_one({"_id": ObjectId(video_id)})
-    return VideoResponse(**video_helper(updated_video))
+    return VideoResponse.model_validate(video)
 
 @api_router.delete("/videos/{video_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_video(
-    video_id: str,
-    current_user: dict = Depends(get_current_user)
+    video_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
 ):
     """Delete a video"""
-    user_id = str(current_user["_id"])
-    
-    try:
-        result = await videos_collection.delete_one({"_id": ObjectId(video_id), "user_id": user_id})
-    except:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid video ID"
+    result = await db.execute(
+        select(Video).where(
+            and_(Video.id == video_id, Video.user_id == current_user.id)
         )
+    )
+    video = result.scalar_one_or_none()
     
-    if result.deleted_count == 0:
+    if not video:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Video not found"
         )
+    
+    await db.delete(video)
+    await db.commit()
     
     return None
 
@@ -382,73 +393,78 @@ async def delete_video(
 @api_router.post("/videos/bulk-update")
 async def bulk_update_videos(
     bulk_data: BulkUpdateRequest,
-    current_user: dict = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
 ):
     """Bulk update videos status"""
-    user_id = str(current_user["_id"])
+    result = await db.execute(
+        select(Video).where(
+            and_(
+                Video.id.in_(bulk_data.video_ids),
+                Video.user_id == current_user.id
+            )
+        )
+    )
+    videos = result.scalars().all()
     
-    # Convert string IDs to ObjectId
-    object_ids = []
-    for vid_id in bulk_data.video_ids:
-        try:
-            object_ids.append(ObjectId(str(vid_id)))
-        except:
-            pass
-    
-    if not object_ids:
+    if not videos:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No valid video IDs provided"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No videos found"
         )
     
-    update_data = {}
-    if bulk_data.status:
-        update_data["status"] = bulk_data.status
-        if bulk_data.status == "concluido":
-            update_data["data_conclusao"] = datetime.now(timezone.utc)
-    if bulk_data.data_conclusao:
-        update_data["data_conclusao"] = bulk_data.data_conclusao
+    # Update videos
+    for video in videos:
+        if bulk_data.status:
+            video.status = bulk_data.status
+            # Auto-set data_conclusao if status changed to concluido
+            if bulk_data.status == "concluido" and not video.data_conclusao:
+                video.data_conclusao = datetime.now(timezone.utc)
+        if bulk_data.data_conclusao:
+            video.data_conclusao = bulk_data.data_conclusao
     
-    result = await videos_collection.update_many(
-        {"_id": {"$in": object_ids}, "user_id": user_id},
-        {"$set": update_data}
-    )
+    await db.commit()
     
-    return {"success": True, "updated_count": result.modified_count}
+    return {"success": True, "updated_count": len(videos)}
 
 @api_router.post("/videos/bulk-delete")
 async def bulk_delete_videos(
     bulk_data: BulkDeleteRequest,
-    current_user: dict = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
 ):
     """Bulk delete videos"""
-    user_id = str(current_user["_id"])
+    result = await db.execute(
+        select(Video).where(
+            and_(
+                Video.id.in_(bulk_data.video_ids),
+                Video.user_id == current_user.id
+            )
+        )
+    )
+    videos = result.scalars().all()
     
-    # Convert string IDs to ObjectId
-    object_ids = []
-    for vid_id in bulk_data.video_ids:
-        try:
-            object_ids.append(ObjectId(str(vid_id)))
-        except:
-            pass
-    
-    if not object_ids:
+    if not videos:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No valid video IDs provided"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No videos found"
         )
     
-    result = await videos_collection.delete_many(
-        {"_id": {"$in": object_ids}, "user_id": user_id}
-    )
+    # Delete videos
+    for video in videos:
+        await db.delete(video)
     
-    return {"success": True, "deleted_count": result.deleted_count}
+    await db.commit()
+    
+    return {"success": True, "deleted_count": len(videos)}
 
 # ==================== IMPORT/EXPORT ====================
 
 def parse_video_text(content: str) -> List[dict]:
     """Parse video data from text format using REGEX"""
     videos = []
+    
+    # Split by video entries (assuming each video starts with [TÍTULO])
     video_blocks = re.split(r'(?=\[TÍTULO\])', content)
     
     for block in video_blocks:
@@ -457,27 +473,33 @@ def parse_video_text(content: str) -> List[dict]:
         
         video_data = {}
         
+        # Extract TÍTULO
         titulo_match = re.search(r'\[TÍTULO\]\s*(.+?)(?=\n|\[|$)', block, re.IGNORECASE)
         if titulo_match:
             video_data['titulo'] = titulo_match.group(1).strip()
         else:
-            continue
+            continue  # Skip if no title
         
+        # Extract DESCRIÇÃO
         descricao_match = re.search(r'\[DESCRIÇÃO\]\s*(.+?)(?=\n\[|$)', block, re.IGNORECASE | re.DOTALL)
         if descricao_match:
             video_data['descricao'] = descricao_match.group(1).strip()
         
+        # Extract ROTEIRO (multi-line)
         roteiro_match = re.search(r'\[ROTEIRO\]\s*(.+?)(?=\n\[|$)', block, re.IGNORECASE | re.DOTALL)
         if roteiro_match:
             video_data['roteiro'] = roteiro_match.group(1).strip()
         
+        # Extract URL
         url_match = re.search(r'\[URL\]\s*(.+?)(?=\n|\[|$)', block, re.IGNORECASE)
         if url_match:
             video_data['url'] = url_match.group(1).strip()
         
+        # Extract STATUS
         status_match = re.search(r'\[STATUS\]\s*(.+?)(?=\n|\[|$)', block, re.IGNORECASE)
         if status_match:
             status_text = status_match.group(1).strip().lower()
+            # Normalize status
             status_map = {
                 'planejado': 'planejado',
                 'em produção': 'em-producao',
@@ -500,11 +522,10 @@ def parse_video_text(content: str) -> List[dict]:
 @api_router.post("/videos/import", response_model=ImportResponse)
 async def import_videos(
     import_data: ImportRequest,
-    current_user: dict = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
 ):
     """Import videos from text format"""
-    user_id = str(current_user["_id"])
-    
     try:
         parsed_videos = parse_video_text(import_data.content)
         
@@ -519,17 +540,21 @@ async def import_videos(
         
         for video_data in parsed_videos:
             try:
-                new_video = {
+                new_video = Video(
                     **video_data,
-                    "user_id": user_id,
-                    "data_criacao": datetime.now(timezone.utc),
-                    "data_conclusao": datetime.now(timezone.utc) if video_data.get('status') == "concluido" else None
-                }
+                    user_id=current_user.id
+                )
                 
-                await videos_collection.insert_one(new_video)
+                # Set data_conclusao if status is concluido
+                if new_video.status == "concluido":
+                    new_video.data_conclusao = datetime.now(timezone.utc)
+                
+                db.add(new_video)
                 imported_count += 1
             except Exception as e:
                 errors.append(f"Error importing '{video_data.get('titulo', 'Unknown')}': {str(e)}")
+        
+        await db.commit()
         
         return ImportResponse(
             success=True,
@@ -544,29 +569,36 @@ async def import_videos(
         )
 
 @api_router.get("/videos/export")
-async def export_videos(current_user: dict = Depends(get_current_user)):
+async def export_videos(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
     """Export all user videos to text format"""
-    user_id = str(current_user["_id"])
-    
-    cursor = videos_collection.find({"user_id": user_id}).sort("data_criacao", -1)
-    videos = await cursor.to_list(length=None)
+    result = await db.execute(
+        select(Video)
+        .where(Video.user_id == current_user.id)
+        .order_by(Video.data_criacao.desc())
+    )
+    videos = result.scalars().all()
     
     if not videos:
         return {"content": ""}
     
+    # Generate text content
     lines = []
     for video in videos:
-        lines.append(f"[TÍTULO] {video['titulo']}")
-        if video.get('descricao'):
-            lines.append(f"[DESCRIÇÃO] {video['descricao']}")
-        if video.get('roteiro'):
-            lines.append(f"[ROTEIRO] {video['roteiro']}")
-        if video.get('url'):
-            lines.append(f"[URL] {video['url']}")
-        lines.append(f"[STATUS] {video['status']}")
-        lines.append("")
+        lines.append(f"[TÍTULO] {video.titulo}")
+        if video.descricao:
+            lines.append(f"[DESCRIÇÃO] {video.descricao}")
+        if video.roteiro:
+            lines.append(f"[ROTEIRO] {video.roteiro}")
+        if video.url:
+            lines.append(f"[URL] {video.url}")
+        lines.append(f"[STATUS] {video.status}")
+        lines.append("")  # Empty line between videos
     
     content = "\n".join(lines)
+    
     return {"content": content}
 
 # Include router in app
@@ -575,4 +607,4 @@ app.include_router(api_router)
 # Root endpoint
 @app.get("/")
 async def root():
-    return {"message": "VideoFlow API is running", "version": "1.0.0 (MongoDB)"}
+    return {"message": "VideoFlow API is running", "version": "1.0.0"}
